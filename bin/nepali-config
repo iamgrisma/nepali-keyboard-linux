@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# nepali-config -- Configuration Manager & Layout Set Selector
+# Developed by Grisma Bhandari (TopNepali)
+# https://fonts.topnepali.com/guides
+# ==============================================================================
+
+set -e
+
+CONFIG_DIR="${HOME}/.config/nepali-keyboard"
+CONFIG_FILE="${CONFIG_DIR}/config"
+AUTOSTART_DIR="${HOME}/.config/autostart"
+AUTOSTART_FILE="${AUTOSTART_DIR}/nepali-keyboard.desktop"
+OPENBOX_RC="${HOME}/.config/openbox/rc.xml"
+LXQT_SESSION="${HOME}/.config/lxqt/session.conf"
+PANEL_CONF="${HOME}/.config/lxqt/panel.conf"
+
+mkdir -p "$CONFIG_DIR"
+mkdir -p "$AUTOSTART_DIR"
+
+# ANSI Colors
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m' # No Color
+
+# Read current mode from config file (default: both)
+CURRENT_MODE="both"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    CURRENT_MODE="${LAYOUT_MODE:-both}"
+fi
+
+# Function to get current active taskbar indicator
+get_current_indicator() {
+    python3 -c "
+import ctypes
+class XkbStateRec(ctypes.Structure):
+    _fields_ = [
+        ('group', ctypes.c_ubyte), ('base_group', ctypes.c_ubyte),
+        ('latched_group', ctypes.c_ubyte), ('locked_group', ctypes.c_ubyte),
+        ('mods', ctypes.c_ushort), ('base_mods', ctypes.c_ushort),
+        ('latched_mods', ctypes.c_ushort), ('locked_mods', ctypes.c_ushort),
+        ('compat_state', ctypes.c_ushort), ('grab_mods', ctypes.c_ubyte),
+        ('compat_grab_mods', ctypes.c_ubyte), ('lookup_mods', ctypes.c_ubyte),
+        ('compat_lookup_mods', ctypes.c_ubyte), ('ptr_buttons', ctypes.c_ushort)
+    ]
+try:
+    x11 = ctypes.CDLL('libX11.so.6')
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    dpy = x11.XOpenDisplay(None)
+    if dpy:
+        state = XkbStateRec()
+        x11.XkbGetState(dpy, 0x0100, ctypes.byref(state))
+        mode = '$CURRENT_MODE'
+        grp = state.group
+        if grp == 0:
+            print('EN (English)')
+        elif grp == 1:
+            if mode == 'romanized':
+                print('NE (Romanized)')
+            else:
+                print('ने (Traditional)')
+        elif grp == 2:
+            print('NE (Romanized)')
+        else:
+            print('EN')
+    else:
+        print('EN')
+except Exception:
+    print('EN')
+" 2>/dev/null || echo "EN"
+}
+
+apply_configuration() {
+    local target_mode="$1"
+    
+    echo "LAYOUT_MODE=\"$target_mode\"" > "$CONFIG_FILE"
+
+    case "$target_mode" in
+        "traditional")
+            # English (Default) + Traditional Only
+            setxkbmap -layout "us,np" -variant ",traditional" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ibus_engines="['xkb:us::eng', 'm17n:ne:traditional']"
+            xkb_layout="us,np"
+            xkb_variant=",traditional"
+            desc="English (EN) ↔ Nepali Traditional (ने)"
+            ;;
+        "romanized")
+            # English (Default) + Romanized Only
+            setxkbmap -layout "us,np" -variant ",romanized" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ibus_engines="['xkb:us::eng', 'm17n:ne:romanized']"
+            xkb_layout="us,np"
+            xkb_variant=",romanized"
+            desc="English (EN) ↔ Nepali Romanized (NE)"
+            ;;
+        *)
+            # English (Default) + Both Traditional & Romanized
+            target_mode="both"
+            setxkbmap -layout "us,np,np" -variant ",traditional,romanized" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ibus_engines="['xkb:us::eng', 'm17n:ne:traditional', 'm17n:ne:romanized']"
+            xkb_layout="us,np,np"
+            xkb_variant=",traditional,romanized"
+            desc="English (EN) → Traditional (ने) → Romanized (NE)"
+            ;;
+    esac
+
+    # 1. Configure IBus: ensure background daemon does NOT show buggy UI popup
+    if command -v gsettings >/dev/null 2>&1; then
+        gsettings set org.freedesktop.ibus.general use-system-keyboard-layout true 2>/dev/null || true
+        gsettings set org.freedesktop.ibus.general preload-engines "$ibus_engines" 2>/dev/null || true
+        gsettings set org.freedesktop.ibus.panel show-icon-on-systray false 2>/dev/null || true
+        gsettings set org.freedesktop.ibus.panel show 0 2>/dev/null || true
+    fi
+
+    # 2. Configure LXQt session for persistence
+    if [ -f "$LXQT_SESSION" ]; then
+        if grep -q '\[Keyboard\]' "$LXQT_SESSION"; then
+            sed -i '/\[Keyboard\]/,/\[/{s/^layout=.*/layout='"$xkb_layout"'/;s/^variant=.*/variant='"$xkb_variant"'/;s/^options=.*/options=grp:alt_shift_toggle/}' "$LXQT_SESSION" 2>/dev/null || true
+        else
+            cat >> "$LXQT_SESSION" << EOF
+
+[Keyboard]
+layout=$xkb_layout
+variant=$xkb_variant
+options=grp:alt_shift_toggle
+EOF
+        fi
+    fi
+
+    # 3. Clean up panel.conf to hide C N S lock clutter if present
+    if [ -f "$PANEL_CONF" ] && grep -q '\[kbindicator\]' "$PANEL_CONF"; then
+        python3 -c "
+with open('$PANEL_CONF', 'r') as f:
+    c = f.read()
+for opt in ['show_caps_lock=false', 'show_num_lock=false', 'show_scroll_lock=false', 'show_layout=true']:
+    k = opt.split('=')[0]
+    if k not in c and '[kbindicator]' in c:
+        c = c.replace('[kbindicator]', '[kbindicator]\n' + opt)
+with open('$PANEL_CONF', 'w') as f:
+    f.write(c)
+" 2>/dev/null || true
+    fi
+
+    # 4. Openbox shortcuts: Left Alt+Shift & Win+Space
+    if [ -f "$OPENBOX_RC" ]; then
+        if ! grep -q "nepali-switch" "$OPENBOX_RC"; then
+            sed -i '/<\/keyboard>/i \
+  <keybind key="W-space">\
+    <action name="Execute">\
+      <command>nepali-switch</command>\
+    </action>\
+  </keybind>\
+  <keybind key="A-Shift_L">\
+    <action name="Execute">\
+      <command>nepali-switch</command>\
+    </action>\
+  </keybind>\
+  <keybind key="A-Shift_R">\
+    <action name="Execute">\
+      <command>nepali-switch</command>\
+    </action>\
+  </keybind>' "$OPENBOX_RC" 2>/dev/null || true
+            openbox --reconfigure 2>/dev/null || true
+        fi
+    fi
+
+    # 5. Clean autostart entry
+    cat > "$AUTOSTART_FILE" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Nepali Keyboard Autostart
+Comment=Restore Nepali keyboard layout preferences on login
+Exec=bash -c "sleep 2 && nepali-switch --init"
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+    chmod +x "$AUTOSTART_FILE"
+
+    # Reset active layout to English (US)
+    if command -v nepali-switch >/dev/null 2>&1; then
+        nepali-switch us 2>/dev/null || true
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}✔ Successfully applied layout mode: ${target_mode}${NC}"
+    echo -e "  Cycle: ${BOLD}${desc}${NC}"
+    echo -e "  Current Taskbar Badge: ${CYAN}[EN]${NC}"
+    echo ""
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -t 1500 -a "Nepali Keyboard" -i input-keyboard "Nepali Keyboard Configured" "Active Mode: $target_mode\n$desc" 2>/dev/null || true
+    fi
+}
+
+# CLI Flags
+case "$1" in
+    "--mode=both"|"both")
+        apply_configuration "both"
+        exit 0
+        ;;
+    "--mode=traditional"|"--mode=trad"|"traditional"|"trad")
+        apply_configuration "traditional"
+        exit 0
+        ;;
+    "--mode=romanized"|"--mode=rom"|"romanized"|"rom")
+        apply_configuration "romanized"
+        exit 0
+        ;;
+    "--status")
+        cur_indicator=$(get_current_indicator)
+        echo "Configured Mode: $CURRENT_MODE"
+        echo "Active Indicator on Taskbar: $cur_indicator"
+        exit 0
+        ;;
+    "--gui")
+        # GUI mode via kdialog if available
+        if command -v kdialog >/dev/null 2>&1; then
+            b_on="off"; t_on="off"; r_on="off"
+            case "$CURRENT_MODE" in
+                "traditional") t_on="on" ;;
+                "romanized") r_on="on" ;;
+                *) b_on="on" ;;
+            esac
+            gui_choice=$(kdialog --title "Nepali Keyboard Settings — Grisma Bhandari" \
+                --radiolist "Choose active typing layouts (English is always included):" \
+                "both" "English + Traditional + Romanized (Cycles all three)" "$b_on" \
+                "traditional" "English + Traditional only (Standard Remington — No Romanized)" "$t_on" \
+                "romanized" "English + Romanized only (Phonetic MPP — No Traditional)" "$r_on" 2>/dev/null || echo "")
+            if [ -n "$gui_choice" ]; then
+                apply_configuration "$gui_choice"
+            fi
+            exit 0
+        fi
+        ;;
+esac
+
+# Interactive Terminal Menu with Line Highlighting
+cur_indicator=$(get_current_indicator)
+
+b_mark="  "; b_color="${NC}"; b_badge=""
+t_mark="  "; t_color="${NC}"; t_badge=""
+r_mark="  "; r_color="${NC}"; r_badge=""
+
+case "$CURRENT_MODE" in
+    "traditional")
+        t_mark="► "; t_color="${GREEN}${BOLD}"; t_badge="  ${GREEN}[✓ ACTIVE]${NC}"
+        ;;
+    "romanized")
+        r_mark="► "; r_color="${GREEN}${BOLD}"; r_badge="  ${GREEN}[✓ ACTIVE]${NC}"
+        ;;
+    *)
+        b_mark="► "; b_color="${GREEN}${BOLD}"; b_badge="  ${GREEN}[✓ ACTIVE]${NC}"
+        ;;
+esac
+
+clear || true
+cat << EOF
+${CYAN}${BOLD}======================================================================
+ 🇳🇵 Nepali Keyboard Suite Settings & Layout Selector
+ Developed by Grisma Bhandari (TopNepali) — https://fonts.topnepali.com
+======================================================================${NC}
+
+  Active Configuration: ${GREEN}${BOLD}${CURRENT_MODE}${NC}
+  Current Taskbar Icon: ${CYAN}${BOLD}[${cur_indicator}]${NC}
+
+  Select an option to change layout behavior (English is non-negotiable):
+
+  ${b_color}${b_mark}[1] English + Both (Traditional & Romanized)${b_badge}${NC}
+      ${DIM}Left Alt + Shift cycles: EN → ने → NE${NC}
+      ${DIM}Best for all-round users who need both typewriter and phonetic layouts.${NC}
+
+  ${t_color}${t_mark}[2] English + Traditional only (Remington Standard)${t_badge}${NC}
+      ${DIM}Left Alt + Shift toggles: EN ↔ ने (Romanized disabled)${NC}
+      ${DIM}Recommended for typewriter users; zero interference from a 3rd layout.${NC}
+
+  ${r_color}${r_mark}[3] English + Romanized only (Phonetic MPP)${r_badge}${NC}
+      ${DIM}Left Alt + Shift toggles: EN ↔ NE (Traditional disabled)${NC}
+      ${DIM}Recommended for students & coders; zero interference from typewriter keys.${NC}
+
+  [4] Keep current setting and Exit
+
+EOF
+
+read -r -p "Enter selection [1-4] (Press Enter to keep current): " user_choice
+
+case "$user_choice" in
+    1)
+        apply_configuration "both"
+        ;;
+    2)
+        apply_configuration "traditional"
+        ;;
+    3)
+        apply_configuration "romanized"
+        ;;
+    *)
+        echo "No changes made."
+        ;;
+esac

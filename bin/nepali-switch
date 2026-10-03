@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# nepali-switch -- Ultra-fast Layout Switcher & Desktop Toast for Nepali Typing
+# Developed by Grisma Bhandari (TopNepali)
+# Dual-synchronized: Works simultaneously with native XKB and IBus m17n
+
+set -e
+
+CONFIG_FILE="${HOME}/.config/nepali-keyboard/config"
+STATE_FILE="${HOME}/.config/nepali-keyboard/current"
+
+mkdir -p "${HOME}/.config/nepali-keyboard"
+
+# Read configured mode: "both" (default), "traditional", or "romanized"
+MODE="both"
+LAYOUT_MODE=""
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    MODE="${LAYOUT_MODE:-$MODE}"
+fi
+
+notify_layout() {
+    local badge="$1"
+    local title="$2"
+    local desc="$3"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -t 1200 -a "Nepali Keyboard" -i input-keyboard "⌨️ [$badge] $title" "$desc" 2>/dev/null || true
+    fi
+}
+
+# Auto-detect IBUS_ADDRESS if not in environment
+if [ -z "$IBUS_ADDRESS" ] && [ -d "${HOME}/.config/ibus/bus" ]; then
+    BUS_FILE=$(ls -t "${HOME}/.config/ibus/bus" 2>/dev/null | head -n 1)
+    if [ -n "$BUS_FILE" ]; then
+        eval "$(grep '^IBUS_ADDRESS=' "${HOME}/.config/ibus/bus/${BUS_FILE}" 2>/dev/null || true)"
+        export IBUS_ADDRESS
+    fi
+fi
+
+sync_ibus() {
+    local engine="$1"
+    if pgrep -x ibus-daemon >/dev/null 2>&1 && command -v ibus >/dev/null 2>&1; then
+        ibus engine "$engine" 2>/dev/null || true
+    fi
+}
+
+set_xkb_group() {
+    local grp="$1"
+    python3 -c "
+import ctypes
+try:
+    x11 = ctypes.CDLL('libX11.so.6')
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    dpy = x11.XOpenDisplay(None)
+    if dpy:
+        x11.XkbLockGroup(dpy, 0x0100, $grp)
+        x11.XFlush(dpy)
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
+apply_mode_layouts() {
+    case "$MODE" in
+        "traditional")
+            setxkbmap -layout "us,np" -variant ",traditional" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ;;
+        "romanized")
+            setxkbmap -layout "us,np" -variant ",romanized" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ;;
+        *)
+            setxkbmap -layout "us,np,np" -variant ",traditional,romanized" -option "grp:alt_shift_toggle" 2>/dev/null || true
+            ;;
+    esac
+}
+
+get_current_group() {
+    python3 -c "
+import ctypes
+class XkbStateRec(ctypes.Structure):
+    _fields_ = [
+        ('group', ctypes.c_ubyte), ('base_group', ctypes.c_ubyte),
+        ('latched_group', ctypes.c_ubyte), ('locked_group', ctypes.c_ubyte),
+        ('mods', ctypes.c_ushort), ('base_mods', ctypes.c_ushort),
+        ('latched_mods', ctypes.c_ushort), ('locked_mods', ctypes.c_ushort),
+        ('compat_state', ctypes.c_ushort), ('grab_mods', ctypes.c_ubyte),
+        ('compat_grab_mods', ctypes.c_ubyte), ('lookup_mods', ctypes.c_ubyte),
+        ('compat_lookup_mods', ctypes.c_ubyte), ('ptr_buttons', ctypes.c_ushort)
+    ]
+try:
+    x11 = ctypes.CDLL('libX11.so.6')
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    dpy = x11.XOpenDisplay(None)
+    if dpy:
+        state = XkbStateRec()
+        x11.XkbGetState(dpy, 0x0100, ctypes.byref(state))
+        print(state.group)
+    else:
+        print(0)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0
+}
+
+switch_to_us() {
+    set_xkb_group 0
+    sync_ibus "xkb:us::eng"
+    echo "us" > "$STATE_FILE"
+    notify_layout "EN" "English (US)" "Standard QWERTY layout"
+}
+
+switch_to_traditional() {
+    set_xkb_group 1
+    sync_ibus "m17n:ne:traditional"
+    echo "traditional" > "$STATE_FILE"
+    notify_layout "ने" "Nepali Traditional" "Traditional Layout (Remington Standard)"
+}
+
+switch_to_romanized() {
+    local grp=2
+    if [ "$MODE" = "romanized" ]; then
+        grp=1
+    fi
+    set_xkb_group "$grp"
+    sync_ibus "m17n:ne:romanized"
+    echo "romanized" > "$STATE_FILE"
+    notify_layout "NE" "Nepali Romanized" "Official MPP Phonetic QWERTY"
+}
+
+# Subcommands
+case "$1" in
+    "--init")
+        apply_mode_layouts
+        switch_to_us
+        exit 0
+        ;;
+    "--status")
+        cur_grp=$(get_current_group)
+        echo "Mode: $MODE"
+        echo "Active Group: $cur_grp"
+        if [ -f "$STATE_FILE" ]; then
+            echo "State: $(cat "$STATE_FILE")"
+        fi
+        exit 0
+        ;;
+    "us"|"eng"|"english")
+        switch_to_us
+        exit 0
+        ;;
+    "trad"|"traditional")
+        switch_to_traditional
+        exit 0
+        ;;
+    "rom"|"romanized")
+        switch_to_romanized
+        exit 0
+        ;;
+esac
+
+# Toggle cycle based on configured MODE
+cur_grp=$(get_current_group)
+
+case "$MODE" in
+    "traditional")
+        # Toggle: English (0) <-> Traditional (1)
+        if [ "$cur_grp" -eq 0 ]; then
+            switch_to_traditional
+        else
+            switch_to_us
+        fi
+        ;;
+    "romanized")
+        # Toggle: English (0) <-> Romanized (1)
+        if [ "$cur_grp" -eq 0 ]; then
+            switch_to_romanized
+        else
+            switch_to_us
+        fi
+        ;;
+    *)
+        # Cycle: English (0) -> Traditional (1) -> Romanized (2) -> English (0)
+        if [ "$cur_grp" -eq 0 ]; then
+            switch_to_traditional
+        elif [ "$cur_grp" -eq 1 ]; then
+            switch_to_romanized
+        else
+            switch_to_us
+        fi
+        ;;
+esac
+
+exit 0

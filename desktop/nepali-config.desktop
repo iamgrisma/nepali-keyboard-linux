@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nepali Keyboard Settings
+Name[ne]=नेपाली किबोर्ड सेटिङ
+Comment=Configure Nepali Unicode layouts (Traditional, Romanized, or Both)
+Comment[ne]=नेपाली युनिकोड लेआउट (ट्रेडिसनल, रोमनाइज्ड वा दुबै) छनोट गर्नुहोस्
+Exec=nepali-config --gui
+Icon=input-keyboard
+Terminal=false
+Categories=Settings;HardwareSettings;Utility;
+Keywords=nepali;keyboard;typing;unicode;loksewa;layout;
+StartupNotify=true
